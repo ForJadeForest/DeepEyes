@@ -4,7 +4,6 @@ import random
 import re
 import os
 
-from math_verify import parse, verify
 
 openai_api_key = "EMPTY"
 openai_api_base_list = [
@@ -280,7 +279,9 @@ def compute_score(predict_str: str, ground_truth: str, extra_info=None) -> float
 
     return {
         "score": final_score,
-        "acc": final_score,
+        "format_reward": format_reward,
+        "tool_reward": tool_reward,
+        "acc_reward": acc_reward,
     }
 
 
@@ -353,14 +354,23 @@ def compute_common_reasoning(predict_str: str, ground_truth: str, extra_info=Non
 
     return {
         "score": final_score,
-        "acc": final_score,
+        "format_reward": format_reward,
+        "tool_reward": tool_reward,
+        "acc_reward": acc_reward,
     }
 
 
 def rule_math_verify(ground_truth, model_answer):
-    gold = parse(ground_truth)
-    answer = parse(model_answer)
-    return verify(gold, answer)
+    try:
+        # Import here to avoid circular import
+        from math_verify import parse, verify
+        # Set parsing_timeout=None to avoid signal.alarm() usage
+        gold = parse(ground_truth, parsing_timeout=None)
+        answer = parse(model_answer, parsing_timeout=None)
+        return verify(gold, answer, timeout_seconds=None)
+    except Exception as e:
+        print(f" [ERROR math] rule_math_verify error: {e}")
+        return False
 
 
 def generative_verify(query, ground_truth, model_answer):
@@ -458,7 +468,9 @@ def compute_score_math(predict_str: str, ground_truth: str, extra_info=None) -> 
 
     return {
         "score": final_score,
-        "acc": final_score,
+        "format_reward": format_reward,
+        "tool_reward": tool_reward,
+        "acc_reward": acc_reward,
     }
 
 
@@ -514,7 +526,9 @@ def compute_score_acc(predict_str: str, ground_truth: str, extra_info=None) -> f
             
     return {
         "score": acc_reward,
-        "acc": acc_reward,
+        "format_reward": 0.0,
+        "tool_reward": 0.0,
+        "acc_reward": acc_reward,
     }
 
 
