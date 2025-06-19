@@ -69,9 +69,37 @@ def run_ppo(config) -> None:
     os.environ["ENSURE_CUDA_VISIBLE_DEVICES"] = os.environ.get("CUDA_VISIBLE_DEVICES", "")
     if not ray.is_initialized():
         # this is for local ray cluster
+        llm_as_a_judge_base = os.environ.get("LLM_AS_A_JUDGE_BASE", None)
+        if llm_as_a_judge_base is None:
+            raise ValueError("LLM_AS_A_JUDGE_BASE is not set")
+        print(f' [DEBUG] LLM_AS_A_JUDGE_BASE={llm_as_a_judge_base}')
+
         ray.init(
             runtime_env={
-                "env_vars": {"TOKENIZERS_PARALLELISM": "true", "NCCL_DEBUG": "WARN", "VLLM_LOGGING_LEVEL": "WARN"}
+                "env_vars": {
+                    "TOKENIZERS_PARALLELISM": "true",
+                    "NCCL_DEBUG": "WARN",
+                    "VLLM_LOGGING_LEVEL": "WARN",
+                    "NCCL_IB_GID_INDEX": "3",
+                    "NCCL_IB_SL": "3",
+                    "NCCL_CHECKS_DISABLE": "1",
+                    "NCCL_P2P_DISABLE": "0",
+                    "NCCL_IB_DISABLE": "0",
+                    "NCCL_LL_THRESHOLD": "16384",
+                    "NCCL_IB_CUDA_SUPPORT": "1",
+                    "NCCL_SOCKET_IFNAME": "bond1",
+                    "UCX_NET_DEVICES": "bond1",
+                    "NCCL_IB_HCA": "mlx5_bond_1,mlx5_bond_5,mlx5_bond_3,mlx5_bond_7,mlx5_bond_4,mlx5_bond_8,mlx5_bond_2,mlx5_bond_6",
+                    "NCCL_COLLNET_ENABLE": "0",
+                    "SHARP_COLL_ENABLE_SAT": "0",
+                    "NCCL_NET_GDR_LEVEL": "2",
+                    "NCCL_IB_QPS_PER_CONNECTION": "4",
+                    "NCCL_IB_TC": "160",
+                    "NCCL_PXN_DISABLE": "0",
+                    "http_proxy": "http://star-proxy.oa.com:3128",
+                    "https_proxy": "http://star-proxy.oa.com:3128",
+                    "LLM_AS_A_JUDGE_BASE": llm_as_a_judge_base,
+                }
             },
             num_cpus=config.ray_init.num_cpus,
         )
@@ -164,6 +192,7 @@ class TaskRunner:
 
             reward_manager_cls = NaiveRewardManager
         elif reward_manager_name == "prime":
+            print(f' [DEBUG] using PrimeRewardManager')
             from verl.workers.reward_manager import PrimeRewardManager
 
             reward_manager_cls = PrimeRewardManager
