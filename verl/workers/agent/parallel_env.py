@@ -79,7 +79,7 @@ def _merge_multi_modal_inputs(mm_input, other):
 
 
 def _preprocess_multi_modal_inputs(prompt_str, processor, **kwargs):
-    if processor is None or "multi_modal_data" not in kwargs:
+    if processor is None:
         return prompt_str, prompt_str, {}
 
     vllm_input_prompt = prompt_str.replace('<image>', '<|vision_start|><|image_pad|><|vision_end|>')
@@ -138,7 +138,7 @@ def agent_rollout_loop(config, vllm_engine, vllm_inputs, prompts, multi_modal_in
     #     151644,    # <|im_start|>
     # ])
     # agent_sampling_params.logits_processors = [exclude_func]
-    # agent_sampling_params.bad_words = ["<|endoftext|>", "<|im_start|>"]
+    agent_sampling_params.bad_words = ["<|endoftext|>", "<size>", "<|im_start|>"]
 
     tokenizer = hf_tokenizer(config.agent.vl_model_path)
     processor = hf_processor(config.agent.vl_model_path)
@@ -157,6 +157,8 @@ def agent_rollout_loop(config, vllm_engine, vllm_inputs, prompts, multi_modal_in
     active_mask = []
     mm_input_list = []
     tool_call_cnt_list = []
+    # TODO: support visualizing rollout_log_probs
+    rollout_log_probs = []
 
     env = ParallelEnv(config.agent, tokenizer, processor)
     env.reset(prompts, vllm_inputs, n=sampling_params.n)

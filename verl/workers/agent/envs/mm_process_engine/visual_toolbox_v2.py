@@ -67,7 +67,7 @@ class VisualToolBoxV2(ToolBase):
             tool_call = json.loads(action.strip())  # 或使用 literal_eval
         except Exception as e:
             error_msg = f"Invalid tool call format: {action.strip()}. Error: {e}"
-            obs = "\n<|im_start|>user\n" + f"Error: {str(error_msg)}" + "<|im_end|>\n<|im_start|>assistant\n"
+            obs = "<|im_end|>\n<|im_start|>user\n" + f"Error: {str(error_msg)}" + "<|im_end|>\n<|im_start|>assistant\n<think>"
             info = {"error": str(e), "status": "failed"}
             return obs, 0.0, False, {}
         try:
@@ -100,18 +100,18 @@ class VisualToolBoxV2(ToolBase):
                 raise ValueError(f"Unknown tool name: {tool_name}")
             # Prepare the observation
             obs = {
-                "prompt": "\n<|im_start|>user\n" + "<tool_response>" +"<image>" + self.user_prompt + "</tool_response>" + "<|im_end|>\n<|im_start|>assistant\n",
+                "prompt": "<|im_end|>\n<|im_start|>user\n" + "<tool_response>" + "<image>" + "</tool_response>" + "<|im_end|>\n<|im_start|>assistant\n<think>",
                 "multi_modal_data": {"image": [current_image]}
             }
             reward = 0.0  # Reward for successful tool call with correct JSON
             done = False
             info = {"status": "success", "tool_used": tool_name}
-            print(f'[DEBUG] SUCCESS ACTION {action_string=}')
+            # print(f'[DEBUG] SUCCESS ACTION {action_string=}')
             return obs, reward, done, info
         except Exception as e:
             # Return an error observation if something goes wrong
-            print(f'[DEBUG] Execute WRONG - {str(e)} {action_string=}')
-            obs = "\n<|im_start|>user\n" + f"Error: {str(e)}" + "<|im_end|>\n<|im_start|>assistant\n"
+            print(f'[ERROR] Execute WRONG - {str(e)} {action_string=}')
+            obs = "<|im_end|>\n<|im_start|>user\n" + f"Error: {str(e)}</tool_response>" + "<|im_end|>\n<|im_start|>assistant\n<think>"
             reward = 0.0  # No reward for failed execution
             done = False
             info = {"error": str(e), "status": "failed"}

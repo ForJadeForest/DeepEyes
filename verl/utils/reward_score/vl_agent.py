@@ -10,7 +10,7 @@ openai_api_key = "EMPTY"
 openai_api_base_list = [
     # "http://172.30.52.123:8000/v1",
     # "http://10.39.3.123:18901/v1",
-    os.environ.get("LLM_AS_A_JUDGE_BASE", "http://10.39.3.123:18901/v1"),
+    os.environ.get("LLM_AS_A_JUDGE_BASE", "http://10.39.13.134:18901/v1"),
 ]
 
 client_list = []
@@ -189,10 +189,12 @@ def extract_answer(text):
 
 def compute_score(predict_str: str, ground_truth: str, extra_info=None) -> float:
     is_format_error = False
-    # predict_str = "<think>" + predict_str
+    predict_str = "<think>" + predict_str
     count_think_1 = predict_str.count("<think>")
     count_think_2 = predict_str.count("</think>")
     if count_think_1 != count_think_2:
+        is_format_error = True
+    if count_think_1 == 0 or count_think_2 == 0:
         is_format_error = True
 
     count_vision_1 = predict_str.count("<|vision_start|><|image_pad|>")
@@ -207,6 +209,9 @@ def compute_score(predict_str: str, ground_truth: str, extra_info=None) -> float
         is_format_error = True
 
     answer_text = predict_str.split("<answer>")[-1].split("</answer>")[0].strip()
+    if not answer_text:
+        is_format_error = True
+        acc_reward = 0.0
 
     # pattern = re.compile(r'<\|im_start\|>assistant(.*?)$', re.DOTALL)  # 匹配最后一个 target 后的所有内容
     # match = pattern.search(predict_str)
@@ -253,8 +258,7 @@ def compute_score(predict_str: str, ground_truth: str, extra_info=None) -> float
             acc_reward = 0.0
 
     # Penalize for model trying to predict longer answer to hack llm-as-judge
-    if len(answer_text) >= 1000:
-        acc_reward = 0.0
+    if answer_text and len(answer_text) >= 300:
         is_format_error = True
 
     tool_reward_base = 1.0 if count_vision_1 > 0 else 0.0
@@ -263,7 +267,7 @@ def compute_score(predict_str: str, ground_truth: str, extra_info=None) -> float
     # reward 1
     # return 0.8 * acc_reward + 0.2 * format_reward + 0.4 * tool_reward_base
     # reward 2
-    return 0.8 * acc_reward + 0.2 * format_reward + 1.2 * tool_reward
+    final_score = 0.8 * acc_reward + 0.4 * format_reward + 1.2 * tool_reward
 
     # reward 2 
     # return 1.0 * acc_reward + 0.2 * format_reward + 1.0 * tool_reward + 0.2 * tool_reward_base
@@ -274,14 +278,20 @@ def compute_score(predict_str: str, ground_truth: str, extra_info=None) -> float
     # extra_reward = tool_reward_base * (count_vision_1 - 1) * (1 - acc_reward)
     # return  0.8 * acc_reward + 0.2 * format_reward + 0.4 * tool_reward_base  + 0.2 * extra_reward
 
+    return {
+        "score": final_score,
+        "acc": final_score,
+    }
 
 
 def compute_common_reasoning(predict_str: str, ground_truth: str, extra_info=None) -> float:
     is_format_error = False
-    # predict_str = "<think>" + predict_str
+    predict_str = "<think>" + predict_str
     count_think_1 = predict_str.count("<think>")
     count_think_2 = predict_str.count("</think>")
     if count_think_1 != count_think_2:
+        is_format_error = True
+    if count_think_1 == 0 or count_think_2 == 0:
         is_format_error = True
 
     count_vision_1 = predict_str.count("<|vision_start|><|image_pad|>")
@@ -297,9 +307,6 @@ def compute_common_reasoning(predict_str: str, ground_truth: str, extra_info=Non
 
     answer_text = extract_answer(predict_no_think) # predict_no_think.split("<answer>")[-1].split("</answer>")[0].strip()
     if not answer_text:
-        acc_reward = 0.0
-        is_format_error = True
-    elif len(answer_text) >= 1000:
         acc_reward = 0.0
         is_format_error = True
     else:
@@ -335,11 +342,19 @@ def compute_common_reasoning(predict_str: str, ground_truth: str, extra_info=Non
                 print(f' [ERROR] judgement format invalid: {judgement}')
                 continue
 
+    if answer_text and len(answer_text) >= 300:
+        is_format_error = True
+
     tool_reward_base = 1.0 if count_vision_1 > 0 else 0.0
     tool_reward = 1.0 if count_vision_1 > 0 and acc_reward > 0.5 else 0.0
     format_reward = -1.0 if is_format_error else 0.0
     print(f' [DEBUG] query={extra_info["question"]}, {ground_truth=}, {answer_text=}, {acc_reward=}, {format_reward=}')
-    return 0.8 * acc_reward + 0.2 * format_reward + 1.2 * tool_reward
+    final_score = 0.8 * acc_reward + 0.4 * format_reward + 1.2 * tool_reward
+
+    return {
+        "score": final_score,
+        "acc": final_score,
+    }
 
 
 def rule_math_verify(ground_truth, model_answer):
@@ -368,7 +383,7 @@ def generative_verify(query, ground_truth, model_answer):
                     {"role": "user", "content": full_prompt},
                 ],
                 seed = random.randint(0, 1000000),
-                temperature=0.0,
+                temperature=0.5,
             )
             response = chat_response.choices[0].message.content.strip()
             break
@@ -387,16 +402,36 @@ def generative_verify(query, ground_truth, model_answer):
 
 def compute_score_math(predict_str: str, ground_truth: str, extra_info=None) -> float:
     is_format_error = False
-    # predict_str = "<think>" + predict_str
+    predict_str = "<think>" + predict_str
     count_think_1 = predict_str.count("<think>")
     count_think_2 = predict_str.count("</think>")
     if count_think_1 != count_think_2:
         is_format_error = True
+    if count_think_1 == 0 or count_think_2 == 0:
+        is_format_error = True
+
+    # count_think_1 = predict_str.count("<think>")
+    # count_think_2 = predict_str.count("</think>")
+    # if count_think_1 != count_think_2:
+    #     is_format_error = True
+
+    count_vision_1 = predict_str.count("<|vision_start|><|image_pad|>")
+    count_vision_2 = predict_str.count("<|image_pad|><|vision_end|>")
+    if count_vision_1 != count_vision_2:
+        is_format_error = True
+
+    predict_no_think = predict_str.split('</think>')[-1].strip()
+    count_answer_1 = predict_no_think.count("<answer>")
+    count_answer_2 = predict_no_think.count("</answer>")
+    if count_answer_1 != count_answer_2:
+        is_format_error = True
 
     model_answer = ""
     predict_no_think = predict_str.split('</think>')[-1].strip()
-    answer_pattern = r'\\boxed{([^}]+)}'
-    answer_list = re.findall(answer_pattern, predict_no_think, flags=re.DOTALL)
+    # answer_pattern = r'\\boxed{([^}]+)}'
+    # answer_list = re.findall(answer_pattern, predict_no_think, flags=re.DOTALL)
+    answer_text = extract_answer(predict_no_think)
+    answer_list = [answer_text] if answer_text else []
     if len(answer_list) == 0:
         acc_reward = 0.0
         is_format_error = True
@@ -410,9 +445,77 @@ def compute_score_math(predict_str: str, ground_truth: str, extra_info=None) -> 
         else:
             acc_reward = 1.0 if generative_verify(extra_info['question'], ground_truth, model_answer) else 0.0
     
+    if not answer_text:
+        is_format_error = True
+        acc_reward = 0.0
+    elif answer_text and len(answer_text) >= 300:
+        is_format_error = True
+
+    tool_reward = 1.0 if count_vision_1 > 0 and acc_reward > 0.5 else 0.0
     format_reward = -1.0 if is_format_error else 0.0
     print(f' [DEBUG] query={extra_info["question"]}, {ground_truth=}, {model_answer=}, {acc_reward=}, {format_reward=}')
-    return 1.2 * acc_reward + 0.4 * format_reward
+    final_score = 0.8 * acc_reward + 0.4 * format_reward + 1.2 * tool_reward
+
+    return {
+        "score": final_score,
+        "acc": final_score,
+    }
+
+
+def compute_score_acc(predict_str: str, ground_truth: str, extra_info=None) -> float:
+    model_answer = ""
+    predict_no_think = predict_str.split('</think>')[-1].strip()
+    answer_text = extract_answer(predict_no_think)
+    if not answer_text:
+        acc_reward = 0.0
+    else:
+        model_answer = answer_text
+        if model_answer == ground_truth:
+            acc_reward = 1.0
+        else:
+            question_text = extra_info['question']
+            client_idx = random.randint(0, len(client_list) - 1)
+            client = client_list[client_idx]
+            model_name = model_name_list[client_idx]
+            full_prompt = get_prompt(answer_text, ground_truth, question_text)
+
+            acc_reward = 0.0
+            for ix in range(32):
+                chat_response = client.chat.completions.create(
+                    model=model_name,
+                    messages=[
+                        {"role": "user", "content": full_prompt},
+                    ],
+                    seed = random.randint(0, 1000000),
+                    temperature=0.5,
+                )
+                response = chat_response.choices[0].message.content.strip()
+                if 'Judgement:' in response:
+                    response = response.split('Judgement:')[-1].strip()
+                    if '1' in response:
+                        acc_reward = 1.0
+                        break
+                    elif '0' in response:
+                        acc_reward = 0.0
+                        break
+                    else:
+                        print(f' [WARNING #1] resp format error {response=}')
+                        continue
+                else:
+                    if response == '1':
+                        acc_reward = 1.0
+                        break
+                    elif response == '0':
+                        acc_reward = 0.0
+                        break
+                    else:
+                        print(f' [WARNING #2] resp format error {response=}')
+                        continue
+            
+    return {
+        "score": acc_reward,
+        "acc": acc_reward,
+    }
 
 
 if __name__ == '__main__':

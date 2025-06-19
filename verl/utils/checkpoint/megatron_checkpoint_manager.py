@@ -14,16 +14,19 @@
 
 import os
 import random
+from typing import Optional
 
 import numpy as np
 import torch
 import torch.distributed
 from megatron.core import mpu, tensor_parallel
 from megatron.core.dist_checkpointing.mapping import ShardedObject
+from transformers import GenerationConfig
 
 from verl.models.weight_loader_registry import get_weight_saver
 from verl.utils.fs import is_non_local
 from verl.utils.megatron_utils import (
+    get_hf_config_and_tokenizer_checkpoint_path,
     get_hf_model_checkpoint_path,
     get_model_checkpoint_path,
     get_optimizer_checkpoint_path,
@@ -61,9 +64,11 @@ class MegatronCheckpointManager(BaseCheckpointManager):
         tokenizer,
         optimizer,
         use_distributed_optimizer: bool,
-        checkpoint_contents: list = ["model", "optimizer", "extra"],
+        checkpoint_contents: Optional[list] = None,
         **kwargs,
     ):
+        if checkpoint_contents is None:
+            checkpoint_contents = ["model", "optimizer", "extra"]
         super().__init__(
             model,
             optimizer=optimizer,
@@ -198,9 +203,7 @@ class MegatronCheckpointManager(BaseCheckpointManager):
             model_path = get_model_checkpoint_path(local_path)
             ckpt_name = self.get_checkpoint_name(model_path, return_base_dir=False)
             state_dicts = torch.load(os.path.join(ckpt_name), weights_only=False)
-            assert len(state_dicts) == len(self.model), (
-                f"state_dicts length: {len(state_dicts)} mismatch with model length: {len(self.model)}"
-            )
+            assert len(state_dicts) == len(self.model), f"state_dicts length: {len(state_dicts)} mismatch with model length: {len(self.model)}"
             for vpp_rank, (state_dict, model) in enumerate(zip(state_dicts, self.model)):
                 model.load_state_dict(state_dict)
             print(f"Loaded sharded model checkpoint from {model_path}")
@@ -215,21 +218,14 @@ class MegatronCheckpointManager(BaseCheckpointManager):
             try:
                 os.remove(local_path) if is_non_local(local_path) else None
             except Exception as e:
-                print(
-                    f"[rank-{self.rank}]: remove local resume ckpt file after loading failed, exception {e} will be ignored"
-                )
+                print(f"[rank-{self.rank}]: remove local resume ckpt file after loading failed, exception {e} will be ignored")
 
     def save_checkpoint(self, local_path: str, hdfs_path: str = None, global_step: int = 0, max_ckpt_to_keep=None):
         # record the previous global step
         self.previous_global_step = global_step
 
         # remove previous local_path
-        if (
-            max_ckpt_to_keep
-            and isinstance(max_ckpt_to_keep, int)
-            and max_ckpt_to_keep > 0
-            and len(self.previous_saved_paths) >= max_ckpt_to_keep
-        ):
+        if max_ckpt_to_keep and isinstance(max_ckpt_to_keep, int) and max_ckpt_to_keep > 0 and len(self.previous_saved_paths) >= max_ckpt_to_keep:
             keep_start = len(self.previous_saved_paths) - max_ckpt_to_keep + 1
             self.remove_previous_save_local_path(self.previous_saved_paths[:keep_start])
             self.previous_saved_paths = self.previous_saved_paths[keep_start:]
@@ -246,17 +242,28 @@ class MegatronCheckpointManager(BaseCheckpointManager):
 
             print(f"Saving sharded model checkpoint to {local_path}")
             model_ckpt_path = get_model_checkpoint_path(local_path)
-            hf_model_ckpt_path = get_hf_model_checkpoint_path(local_path)
+            hf_config_and_tokenizer_path = get_hf_config_and_tokenizer_checkpoint_path(local_path)
             ckpt_name = self.get_checkpoint_name(model_ckpt_path, return_base_dir=False)
             torch.save(state_dicts, os.path.join(ckpt_name))
-            self.processing_class.save_pretrained(hf_model_ckpt_path)  # tokenizer will be saved to hf_model_ckpt_path
-            print(f"Saved checkpoint to {model_ckpt_path}")
-            if hdfs_path is not None:
-                print(f"Uploading checkpoint to {hdfs_path}")
-                from verl.utils import hdfs_io
 
-                hdfs_io.makedirs(hdfs_path, exist_ok=True)
-                hdfs_io.copy(src=model_ckpt_path, dst=hdfs_path, dirs_exist_ok=True)
+            print(f"Saved checkpoint to {model_ckpt_path}")
+            if self.rank == 0:
+                self.processing_class.save_pretrained(hf_config_and_tokenizer_path)
+                self.hf_config.save_pretrained(hf_config_and_tokenizer_path)
+                if hasattr(self.hf_config, "name_or_path") and self.hf_config.name_or_path:
+                    try:
+                        generation_config = GenerationConfig.from_pretrained(self.hf_config.name_or_path)
+                        generation_config.save_pretrained(hf_config_and_tokenizer_path)
+                    except Exception:
+                        # if the generation config isn't available, we don't save it
+                        pass
+                if hdfs_path is not None:
+                    print(f"Uploading checkpoint to {hdfs_path}")
+                    from verl.utils import hdfs_io
+
+                    hdfs_io.makedirs(hdfs_path, exist_ok=True)
+                    hdfs_io.copy(src=model_ckpt_path, dst=hdfs_path, dirs_exist_ok=True)
+                    hdfs_io.copy(src=hf_config_and_tokenizer_path, dst=hdfs_path, dirs_exist_ok=True)
 
         if "hf_model" in self.checkpoint_contents:
             # wait for everyone to dump to local
@@ -269,11 +276,10 @@ class MegatronCheckpointManager(BaseCheckpointManager):
             )
 
             torch.distributed.barrier()
-            print(f"self.param_dtype: {self.param_dtype}")
-            for key in state_dict.keys():
-                print(f"state_dict[key].dtype: {key} {state_dict[key].dtype}")
-            torch.distributed.barrier()
             if self.rank == 0:
+                print(f"self.param_dtype: {self.param_dtype}")
+                for key in state_dict.keys():
+                    print(f"state_dict[key].dtype: {key} {state_dict[key].dtype}")
                 hf_model_ckpt_path = get_hf_model_checkpoint_path(local_path)
                 import warnings
 
@@ -284,15 +290,15 @@ class MegatronCheckpointManager(BaseCheckpointManager):
                     if "mistral7b-rm" in self.config.model.path:
                         from transformers import MistralForSequenceClassification
 
-                        model = MistralForSequenceClassification.from_pretrained(
-                            self.config.model.path
-                        )  # use score head instead of lm_head
+                        model = MistralForSequenceClassification.from_pretrained(self.config.model.path)  # use score head instead of lm_head
                         state_dict["score.weight"] = state_dict["score.weight"]
                     else:
                         from transformers import AutoModelForCausalLM
 
                         model = AutoModelForCausalLM.from_pretrained(self.config.model.path, torch_dtype="auto")
                 model.save_pretrained(hf_model_ckpt_path, state_dict=state_dict)
+                self.processing_class.save_pretrained(hf_model_ckpt_path)
+
                 if hdfs_path is not None:
                     print(f"Uploading checkpoint to {hdfs_path}")
                     from verl.utils import hdfs_io
