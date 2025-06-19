@@ -185,11 +185,15 @@ def agent_rollout_loop(config, vllm_engine, vllm_inputs, prompts, multi_modal_in
 
         active_indices = [idx for idx, is_active in enumerate(active_mask) if is_active]
         active_vllm_inputs = [vinput for vinput, is_active in zip(vllm_input_list, active_mask) if is_active]
-        actions = vllm_engine.generate(
-            prompts=active_vllm_inputs,
-            sampling_params=agent_sampling_params,
-            use_tqdm=False
-        )
+
+        try:
+            actions = vllm_engine.generate(
+                prompts=active_vllm_inputs,
+                sampling_params=agent_sampling_params,
+                use_tqdm=False
+            )
+        except Exception as e:
+            raise ValueError(f' [DEBUG ParallelEnv] {prompts}\n\n {active_vllm_inputs}\n\n {agent_sampling_params}\n\n {e}')
 
         if pg.is_first_rank:
             obs_results = env.step(active_indices, actions)
