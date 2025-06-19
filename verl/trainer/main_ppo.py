@@ -31,6 +31,7 @@ def main(config):
 def run_ppo(config) -> None:
     if not ray.is_initialized():
         # this is for local ray cluster
+        import os
         llm_as_a_judge_base = os.environ.get("LLM_AS_A_JUDGE_BASE", None)
         if llm_as_a_judge_base is None:
             raise ValueError("LLM_AS_A_JUDGE_BASE is not set")
@@ -42,6 +43,7 @@ def run_ppo(config) -> None:
                     "TOKENIZERS_PARALLELISM": "true",
                     "NCCL_DEBUG": "WARN",
                     "VLLM_LOGGING_LEVEL": "WARN",
+                    "VLLM_ALLOW_RUNTIME_LORA_UPDATING": "true",
                     "NCCL_IB_GID_INDEX": "3",
                     "NCCL_IB_SL": "3",
                     "NCCL_CHECKS_DISABLE": "1",
