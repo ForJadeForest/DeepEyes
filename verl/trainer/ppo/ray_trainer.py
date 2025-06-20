@@ -1236,6 +1236,13 @@ class RayPPOTrainer:
 
                 if self.config.actor_rollout_ref.rollout.agent.activate_agent:
                     metrics.update(compute_agent_metrics(batch=batch))
+                reward_keys = list(filter(lambda x: x.endswith("reward"), batch.non_tensor_batch.keys()))
+                if reward_keys:
+                    sub_reward_metrics = {
+                        k: np.mean(batch.non_tensor_batch[k]) for k in reward_keys
+                    }
+                    print(f" [DEBUG sub_reward_metrics] {sub_reward_metrics=}")
+                    metrics.update(sub_reward_metrics)
 
                 # TODO: make a canonical logger that supports various backend
                 logger.log(data=metrics, step=self.global_steps, batch=batch, tokenizer=self.tokenizer)
