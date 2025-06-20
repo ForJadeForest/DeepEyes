@@ -26,12 +26,13 @@ from typing import Dict, List, Optional, Union
 class AsyncNaiveRewardManager:
     """The async reward manager that maintains the same interface as NaiveRewardManager but processes rewards asynchronously."""
 
-    def __init__(self, tokenizer, num_examine, compute_score=None, reward_fn_key="data_source") -> None:
+    def __init__(self, tokenizer, num_examine, compute_score=None, reward_fn_key="data_source", batch_size=1024) -> None:
         self.tokenizer = tokenizer
         self.num_examine = num_examine  # the number of batches of decoded responses to print to the console
         self.compute_score = compute_score or default_compute_score
         self.reward_fn_key = reward_fn_key
         self.step_cnt = 0
+        self.batch_size = batch_size
         
         # Create event loop for async operations
         try:
@@ -39,72 +40,76 @@ class AsyncNaiveRewardManager:
         except RuntimeError:
             self.loop = asyncio.new_event_loop()
             asyncio.set_event_loop(self.loop)
+        
+        # Create semaphore for batch control
+        self.semaphore = asyncio.Semaphore(self.batch_size)
 
     async def process_single_item(self, data_item, i: int, reward_tensor: torch.Tensor, 
                                 reward_extra_info: defaultdict, already_print_data_sources: Dict) -> None:
         """Process a single data item asynchronously"""
-        prompt_ids = data_item.batch["prompts"]
-        prompt_length = prompt_ids.shape[-1]
+        async with self.semaphore:  # Use semaphore to control concurrency
+            prompt_ids = data_item.batch["prompts"]
+            prompt_length = prompt_ids.shape[-1]
 
-        valid_prompt_length = data_item.batch["attention_mask"][:prompt_length].sum()
-        valid_prompt_ids = prompt_ids[-valid_prompt_length:]
+            valid_prompt_length = data_item.batch["attention_mask"][:prompt_length].sum()
+            valid_prompt_ids = prompt_ids[-valid_prompt_length:]
 
-        response_ids = data_item.batch["responses"]
-        valid_response_length = data_item.batch["attention_mask"][prompt_length:].sum()
-        valid_response_ids = response_ids[:valid_response_length]
+            response_ids = data_item.batch["responses"]
+            valid_response_length = data_item.batch["attention_mask"][prompt_length:].sum()
+            valid_response_ids = response_ids[:valid_response_length]
 
-        # decode
-        prompt_str = self.tokenizer.decode(valid_prompt_ids)
-        response_str = self.tokenizer.decode(valid_response_ids)
+            # decode
+            prompt_str = self.tokenizer.decode(valid_prompt_ids)
+            response_str = self.tokenizer.decode(valid_response_ids)
 
-        ground_truth = data_item.non_tensor_batch["reward_model"]["ground_truth"]
-        data_source = data_item.non_tensor_batch[self.reward_fn_key]
-        extra_info = data_item.non_tensor_batch.get("extra_info", None)
+            ground_truth = data_item.non_tensor_batch["reward_model"]["ground_truth"]
+            data_source = data_item.non_tensor_batch[self.reward_fn_key]
+            extra_info = data_item.non_tensor_batch.get("extra_info", None)
 
-        try:
-            # Compute score asynchronously with timeout protection
-            score = await asyncio.wait_for(
-                asyncio.to_thread(
-                    self.compute_score,
-                    data_source=data_source,
-                    solution_str=response_str,
-                    ground_truth=ground_truth,
-                    extra_info=extra_info,
-                ),
-                timeout=300.0  # 30 seconds timeout
-            )
-        except asyncio.TimeoutError:
-            print(f" [Timeout] Score computation timed out for item {i}")
-            score = {"score": 0.0}  # Default score for timeout
-        except Exception as e:
-            print(f" [Error] Score computation failed for item {i}: {e}")
-            score = {"score": 0.0}  # Default score for errors
+            try:
+                # Compute score asynchronously with timeout protection
+                score = await asyncio.wait_for(
+                    asyncio.to_thread(
+                        self.compute_score,
+                        data_source=data_source,
+                        solution_str=response_str,
+                        ground_truth=ground_truth,
+                        extra_info=extra_info,
+                    ),
+                    timeout=300.0
+                )
+            except asyncio.TimeoutError:
+                print(f" [Timeout] Score computation timed out for item {i}")
+                score = {"score": 0.0}  # Default score for timeout
+            except Exception as e:
+                print(f" [Error] Score computation failed for item {i}: {e}")
+                score = {"score": 0.0}  # Default score for errors
 
-        if isinstance(score, dict):
-            reward = score["score"]
-            # Store the information including original reward
-            for key, value in score.items():
-                reward_extra_info[key].append(value)
-        else:
-            reward = score
-
-        reward_tensor[i, valid_response_length - 1] += reward
-
-        if data_source not in already_print_data_sources:
-            already_print_data_sources[data_source] = 0
-
-        if already_print_data_sources[data_source] < self.num_examine:
-            already_print_data_sources[data_source] += 1
-            print("[prompt]", prompt_str)
-            print("[response]", response_str)
-            print("[ground_truth]", ground_truth)
             if isinstance(score, dict):
+                reward = score["score"]
+                # Store the information including original reward
                 for key, value in score.items():
-                    print(f"[{key}]", value)
+                    reward_extra_info[key].append(value)
             else:
-                print("[score]", score)
+                reward = score
 
-        self.step_cnt += 1
+            reward_tensor[i, valid_response_length - 1] += reward
+
+            if data_source not in already_print_data_sources:
+                already_print_data_sources[data_source] = 0
+
+            if already_print_data_sources[data_source] < self.num_examine:
+                already_print_data_sources[data_source] += 1
+                print("[prompt]", prompt_str)
+                print("[response]", response_str)
+                print("[ground_truth]", ground_truth)
+                if isinstance(score, dict):
+                    for key, value in score.items():
+                        print(f"[{key}]", value)
+                else:
+                    print("[score]", score)
+
+            self.step_cnt += 1
 
     def __call__(self, data: DataProto, return_dict=False):
         """Process rewards asynchronously while maintaining the same interface"""
@@ -126,15 +131,21 @@ class AsyncNaiveRewardManager:
 
         already_print_data_sources = {}
 
-        # Create tasks for all items
-        tasks = []
-        for i in range(len(data)):
-            data_item = data[i]
-            task = self.process_single_item(data_item, i, reward_tensor, reward_extra_info, already_print_data_sources)
-            tasks.append(task)
-
-        # Run all tasks concurrently
-        self.loop.run_until_complete(asyncio.gather(*tasks))
+        # Process data in batches
+        total_items = len(data)
+        for batch_start in range(0, total_items, self.batch_size):
+            batch_end = min(batch_start + self.batch_size, total_items)
+            batch_tasks = []
+            
+            # Create tasks for current batch
+            for i in range(batch_start, batch_end):
+                data_item = data[i]
+                task = self.process_single_item(data_item, i, reward_tensor, reward_extra_info, already_print_data_sources)
+                batch_tasks.append(task)
+            
+            # Run current batch of tasks
+            print(f" [Processing] Batch {batch_start//self.batch_size + 1}, items {batch_start} to {batch_end-1}")
+            self.loop.run_until_complete(asyncio.gather(*batch_tasks))
 
         if return_dict:
             return {
