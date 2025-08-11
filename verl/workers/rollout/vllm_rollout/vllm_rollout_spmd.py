@@ -46,8 +46,8 @@ from verl import DataProto
 from verl.third_party.vllm import vllm_version
 from verl.utils.debug import GPUMemoryLogger
 from verl.utils.torch_functional import get_response_mask, pad_2d_list_to_length
-from verl.workers.rollout.base import BaseRollout
 from verl.workers.agent import agent_rollout_loop
+from verl.workers.rollout.base import BaseRollout
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
@@ -341,6 +341,9 @@ class vLLMRollout(BaseRollout):
                 # NOTE(linjunrong): for multi-turn https://github.com/volcengine/verl/pull/1037
                 if "tools_kwargs" in non_tensor_batch.keys():
                     non_tensor_batch["tools_kwargs"] = _repeat_interleave(non_tensor_batch["tools_kwargs"], self.sampling_params.n)
+
+                if "image_id" in non_tensor_batch.keys():
+                    non_tensor_batch["image_id"] = _repeat_interleave(non_tensor_batch["image_id"], self.sampling_params.n)
 
             seq = torch.cat([idx, response], dim=-1)
 

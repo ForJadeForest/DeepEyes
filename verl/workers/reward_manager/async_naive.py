@@ -12,50 +12,68 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from collections import defaultdict
 import asyncio
+import datetime
+import json
+from collections import defaultdict
+from typing import Dict, List, Optional, Union
+
 import torch
 
 from verl import DataProto
 from verl.utils.reward_score import default_compute_score
 
-import json
-import datetime
-from typing import Dict, List, Optional, Union
 
 class AsyncNaiveRewardManager:
     """The async reward manager that maintains the same interface as NaiveRewardManager but processes rewards asynchronously."""
 
-    def __init__(self, tokenizer, num_examine, compute_score=None, reward_fn_key="data_source", batch_size=1024) -> None:
+    def __init__(
+        self,
+        tokenizer,
+        num_examine,
+        compute_score=None,
+        reward_fn_key="data_source",
+        batch_size=1024,
+    ) -> None:
         self.tokenizer = tokenizer
         self.num_examine = num_examine  # the number of batches of decoded responses to print to the console
         self.compute_score = compute_score or default_compute_score
         self.reward_fn_key = reward_fn_key
         self.step_cnt = 0
         self.batch_size = batch_size
-        
+
         # Create event loop for async operations
         try:
             self.loop = asyncio.get_event_loop()
         except RuntimeError:
             self.loop = asyncio.new_event_loop()
             asyncio.set_event_loop(self.loop)
-        
+
         # Create semaphore for batch control
         self.semaphore = asyncio.Semaphore(self.batch_size)
 
-    async def process_single_item(self, data_item, i: int, reward_tensor: torch.Tensor, 
-                                reward_extra_info: defaultdict, already_print_data_sources: Dict) -> None:
+    async def process_single_item(
+        self,
+        data_item,
+        i: int,
+        reward_tensor: torch.Tensor,
+        reward_extra_info: defaultdict,
+        already_print_data_sources: Dict,
+    ) -> None:
         """Process a single data item asynchronously"""
         async with self.semaphore:  # Use semaphore to control concurrency
             prompt_ids = data_item.batch["prompts"]
             prompt_length = prompt_ids.shape[-1]
 
-            valid_prompt_length = data_item.batch["attention_mask"][:prompt_length].sum()
+            valid_prompt_length = data_item.batch["attention_mask"][
+                :prompt_length
+            ].sum()
             valid_prompt_ids = prompt_ids[-valid_prompt_length:]
 
             response_ids = data_item.batch["responses"]
-            valid_response_length = data_item.batch["attention_mask"][prompt_length:].sum()
+            valid_response_length = data_item.batch["attention_mask"][
+                prompt_length:
+            ].sum()
             valid_response_ids = response_ids[:valid_response_length]
 
             # decode
@@ -76,15 +94,28 @@ class AsyncNaiveRewardManager:
                         ground_truth=ground_truth,
                         extra_info=extra_info,
                     ),
-                    timeout=300.0
+                    timeout=600.0,
                 )
             except asyncio.TimeoutError:
-                print(f" [Timeout] Score computation timed out for item {i}")
-                score = {"score": 0.0}  # Default score for timeout
+                print(
+                    f" [Timeout] Score computation timed out for item {i}\n{data_source=}\n{response_str=}\n{ground_truth=}"
+                )
+                score = {
+                    "score": 0.0,
+                    "format_reward": 0.0,
+                    "tool_reward": 0.0,
+                    "acc_reward": 0.0,
+                }  # Default score for timeout
             except Exception as e:
-                print(f" [Error] Score computation failed for item {i}: {e}")
-                score = {"score": 0.0}  # Default score for errors
-
+                print(
+                    f" [Error] Score computation failed for item {i}: {e}, \n{data_source=}\n{response_str=}\n{ground_truth=}"
+                )
+                score = {
+                    "score": 0.0,
+                    "format_reward": 0.0,
+                    "tool_reward": 0.0,
+                    "acc_reward": 0.0,
+                }  # Default score for timeout
             if isinstance(score, dict):
                 reward = score["score"]
                 # Store the information including original reward
@@ -124,10 +155,16 @@ class AsyncNaiveRewardManager:
         reward_tensor = torch.zeros_like(data.batch["responses"], dtype=torch.float32)
         reward_extra_info = defaultdict(list)
 
-        action_or_attn_mask = data.batch['action_mask'] if 'action_mask' in data.batch.keys() else data.batch['attention_mask']
-        if 'env_reward' in data.batch.keys():
-            reward_tensor += data.batch['env_reward']
-            print(f' [DEBUG reward] mean={reward_tensor.mean().item()}, min={reward_tensor.min().item()}, max={reward_tensor.max().item()}')
+        action_or_attn_mask = (
+            data.batch["action_mask"]
+            if "action_mask" in data.batch.keys()
+            else data.batch["attention_mask"]
+        )
+        if "env_reward" in data.batch.keys():
+            reward_tensor += data.batch["env_reward"]
+            print(
+                f" [DEBUG reward] mean={reward_tensor.mean().item()}, min={reward_tensor.min().item()}, max={reward_tensor.max().item()}"
+            )
 
         already_print_data_sources = {}
 
@@ -136,15 +173,23 @@ class AsyncNaiveRewardManager:
         for batch_start in range(0, total_items, self.batch_size):
             batch_end = min(batch_start + self.batch_size, total_items)
             batch_tasks = []
-            
+
             # Create tasks for current batch
             for i in range(batch_start, batch_end):
                 data_item = data[i]
-                task = self.process_single_item(data_item, i, reward_tensor, reward_extra_info, already_print_data_sources)
+                task = self.process_single_item(
+                    data_item,
+                    i,
+                    reward_tensor,
+                    reward_extra_info,
+                    already_print_data_sources,
+                )
                 batch_tasks.append(task)
-            
+
             # Run current batch of tasks
-            print(f" [Processing] Batch {batch_start//self.batch_size + 1}, items {batch_start} to {batch_end-1}")
+            print(
+                f" [Processing] Batch {batch_start//self.batch_size + 1}, items {batch_start} to {batch_end-1}"
+            )
             self.loop.run_until_complete(asyncio.gather(*batch_tasks))
 
         if return_dict:

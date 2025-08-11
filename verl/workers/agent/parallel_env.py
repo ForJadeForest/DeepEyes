@@ -1,19 +1,24 @@
-import re
 import io
-import torch
-import numpy as np
-from copy import deepcopy
-from tqdm import tqdm
-from functools import partial
+import re
+import time
 from concurrent.futures import ThreadPoolExecutor
+from copy import deepcopy
+from functools import partial
+from random import random
+
+import numpy as np
+import torch
+from tqdm import tqdm
+from transformers import Qwen2_5_VLProcessor
 
 from verl import DataProto
 from verl.models.transformers.qwen2_vl import get_rope_index
-from verl.utils.model import compute_position_id_with_mask
-from verl.utils import hf_tokenizer, hf_processor
+from verl.utils import hf_processor, hf_tokenizer
 from verl.utils.dataset.vision_utils import process_image, process_raw_image, process_video
+from verl.utils.model import compute_position_id_with_mask
 from verl.utils.torch_functional import pad_2d_list_to_length
 from verl.workers.agent.tool_envs import ToolBase
+
 
 def _strip_system_block(text: str) -> str:
     """
@@ -74,6 +79,15 @@ def _merge_multi_modal_inputs(mm_input, other):
         else:
             raise ValueError(f"Invalid {type(mm_value)=}, {type(other_value)=}")
 
+        if key == "image_grid_thw":
+            if hasattr(merged_value, 'dtype'):
+                if 'float' in str(merged_value.dtype):
+                    merged_value = merged_value.to(torch.int64)
+        
+        if key == "video_grid_thw":
+            if hasattr(merged_value, 'dtype'):
+                if 'float' in str(merged_value.dtype):
+                    merged_value = merged_value.to(torch.int64)
         output_dict[key] = merged_value
     return dict(**output_dict, **other)
 
@@ -82,7 +96,8 @@ def _preprocess_multi_modal_inputs(prompt_str, processor, **kwargs):
     if processor is None:
         return prompt_str, prompt_str, {}
 
-    vllm_input_prompt = prompt_str.replace('<image>', '<|vision_start|><|image_pad|><|vision_end|>')
+    # vllm_input_prompt = prompt_str.replace('<image>', '<|vision_start|><|image_pad|><|vision_end|>')
+    vllm_input_prompt = prompt_str
     input_mm_data = kwargs.get("multi_modal_data", {"image": []})
     
     image_info_list = []
@@ -103,6 +118,16 @@ def _preprocess_multi_modal_inputs(prompt_str, processor, **kwargs):
         model_inputs.pop("second_per_grid_ts")
 
     mm_inputs = dict(model_inputs)
+
+    # 🔧 修复processor返回的float类型grid
+    if 'image_grid_thw' in mm_inputs:
+        if hasattr(mm_inputs['image_grid_thw'], 'dtype') and mm_inputs['image_grid_thw'].dtype in [torch.float32, torch.float64]:
+            mm_inputs['image_grid_thw'] = mm_inputs['image_grid_thw'].to(torch.int64)
+    
+    if 'video_grid_thw' in mm_inputs:
+        if hasattr(mm_inputs['video_grid_thw'], 'dtype') and mm_inputs['video_grid_thw'].dtype in [torch.float32, torch.float64]:
+            mm_inputs['video_grid_thw'] = mm_inputs['video_grid_thw'].to(torch.int64)
+    
     return vllm_input_prompt, input_ids, mm_inputs
 
 
@@ -189,16 +214,21 @@ def agent_rollout_loop(config, vllm_engine, vllm_inputs, prompts, multi_modal_in
         active_vllm_inputs = [vinput for vinput, is_active in zip(vllm_input_list, active_mask) if is_active]
 
         try:
+            generate_time_start = time.time()
             actions = vllm_engine.generate(
                 prompts=active_vllm_inputs,
                 sampling_params=agent_sampling_params,
                 use_tqdm=False
             )
+            generate_time_end = time.time()
         except Exception as e:
             raise ValueError(f' [DEBUG ParallelEnv] {prompts}\n\n {active_vllm_inputs}\n\n {agent_sampling_params}\n\n {e}')
 
         if pg.is_first_rank:
+            env_start_time = time.time()
             obs_results = env.step(active_indices, actions)
+            env_end_time = time.time()
+            print(f"Gen/CallTool Time Ratio {generate_time_end - generate_time_start:.2f} / {env_end_time - env_start_time:.2f} = {(generate_time_end - generate_time_start) / (env_end_time - env_start_time):.2f}")
         else:
             obs_results = None
 
@@ -479,6 +509,7 @@ class ParallelEnv:
             data_item = prompts[i]  # DataProtoItem
             tool_name = data_item.non_tensor_batch.pop(self.config.tool_name_key, '')
             raw_prompt = data_item.non_tensor_batch.pop('raw_prompt', None)
+            image_id = data_item.non_tensor_batch.get("image_id", None)
 
             vllm_input_item = vllm_inputs[i]   # {"prompt_token_ids": ..., "multi_modal_data": ...}
             multi_modal_data = vllm_input_item.get("multi_modal_data", None)
@@ -491,6 +522,7 @@ class ParallelEnv:
                         raw_prompt=raw_prompt, 
                         multi_modal_data=deepcopy(multi_modal_data),
                         origin_multi_modal_data=deepcopy(origin_multi_modal_data),
+                        image_id=deepcopy(image_id),
                     )
                     self.tools.append(tool_fns)
                     reset_output_list.append(reset_output)

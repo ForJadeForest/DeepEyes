@@ -46,6 +46,7 @@ from verl.single_controller.ray.base import create_colocated_worker_cls
 from verl.trainer.ppo import core_algos
 from verl.trainer.ppo.core_algos import agg_loss
 from verl.trainer.ppo.metric_utils import (
+    compute_agent_metrics,
     compute_data_metrics,
     compute_throughout_metrics,
     compute_timing_metrics,
@@ -60,8 +61,6 @@ from verl.utils.seqlen_balancing import get_seqlen_balanced_partitions, log_seql
 from verl.utils.torch_functional import masked_mean
 from verl.utils.tracking import ValidationGenerationsLogger
 from verl.workers.rollout.async_server import AsyncLLMServerManager
-
-from verl.trainer.ppo.metric_utils import compute_agent_metrics
 
 WorkerType = Type[Worker]
 
@@ -683,6 +682,8 @@ class RayPPOTrainer:
                 non_tensor_batch_keys_to_pop.append("raw_prompt")
             if "tools_kwargs" in test_batch.non_tensor_batch:
                 non_tensor_batch_keys_to_pop.append("tools_kwargs")
+            if "image_id" in test_batch.non_tensor_batch:
+                non_tensor_batch_keys_to_pop.append("image_id")
             test_gen_batch = test_batch.pop(
                 batch_keys=batch_keys_to_pop,
                 non_tensor_batch_keys=non_tensor_batch_keys_to_pop,
@@ -700,6 +701,10 @@ class RayPPOTrainer:
                     test_gen_batch.non_tensor_batch["origin_multi_modal_data"] = test_batch.non_tensor_batch.pop("origin_multi_modal_data")
                 if "multi_modal_inputs" in test_batch.non_tensor_batch:
                     test_gen_batch.non_tensor_batch["multi_modal_inputs"] = test_batch.non_tensor_batch.pop("multi_modal_inputs")
+                if "image_id" in test_batch.non_tensor_batch:
+                    test_gen_batch.non_tensor_batch["image_id"] = test_batch.non_tensor_batch.pop("image_id")
+                print(f"non_tensor_batch_keys_to_pop: {non_tensor_batch_keys_to_pop}")
+                print(f' [DEBUG trainer] {test_batch.non_tensor_batch.keys()=}')
 
             test_gen_batch.meta_info = {
                 "eos_token_id": self.tokenizer.eos_token_id,
@@ -1012,6 +1017,8 @@ class RayPPOTrainer:
                     non_tensor_batch_keys_to_pop.append("raw_prompt")
                 if "tools_kwargs" in batch.non_tensor_batch:
                     non_tensor_batch_keys_to_pop.append("tools_kwargs")
+                if "image_id" in batch.non_tensor_batch:
+                    non_tensor_batch_keys_to_pop.append("image_id")
                 gen_batch = batch.pop(
                     batch_keys=batch_keys_to_pop,
                     non_tensor_batch_keys=non_tensor_batch_keys_to_pop,
@@ -1031,6 +1038,7 @@ class RayPPOTrainer:
                         gen_batch.non_tensor_batch["origin_multi_modal_data"] = batch.non_tensor_batch.pop("origin_multi_modal_data")
                     if "multi_modal_inputs" in batch.non_tensor_batch:
                         gen_batch.non_tensor_batch["multi_modal_inputs"] = batch.non_tensor_batch.pop("multi_modal_inputs")
+
                     print(f' [DEBUG trainer] {gen_batch.non_tensor_batch.keys()=}')
 
                 is_last_step = self.global_steps >= self.total_training_steps

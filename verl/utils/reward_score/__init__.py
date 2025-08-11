@@ -15,6 +15,7 @@
 
 from verl.utils.import_utils import deprecated
 
+
 def default_compute_score(data_source, solution_str, ground_truth, extra_info=None, sandbox_fusion_url=None, concurrent_semaphore=None):
     """Compute the score for a given solution based on the data source.
 
@@ -87,8 +88,10 @@ def default_compute_score(data_source, solution_str, ground_truth, extra_info=No
         res = agent.compute_score_eval(solution_str, ground_truth)
 
     elif data_source in ['vstar', 'vl_agent', 'chart']:
-        from . import vl_agent
-        res = vl_agent.compute_score(solution_str, ground_truth, extra_info)
+        # from . import vl_agent
+        # res = vl_agent.compute_score(solution_str, ground_truth, extra_info)
+        from . import code_agent
+        res = code_agent.compute_score(solution_str, ground_truth, extra_info)
 
     elif data_source in ['geoguessr']:
         from . import vl_agent
@@ -99,8 +102,10 @@ def default_compute_score(data_source, solution_str, ground_truth, extra_info=No
         res = vl_agent.compute_score_acc(solution_str, ground_truth, extra_info)
 
     elif data_source in ['thinklite_eureka', 'xince']:
-        from . import vl_agent
-        res = vl_agent.compute_score_math(solution_str, ground_truth, extra_info)
+        # from . import vl_agent
+        # res = vl_agent.compute_score_math(solution_str, ground_truth, extra_info)
+        from . import code_agent
+        res = code_agent.compute_score_math(solution_str, ground_truth, extra_info)
 
     elif data_source in ["frozenlake"]:
         res = 0.0
